@@ -6,7 +6,8 @@ A Claude Code mod that picks the model for each prompt, so you don't have to `/m
 
 How it works:
 - **Discovery**: lists models from `/v1/models` using the session's own login, keeps those that answer a
-  1-token test call, and ranks them into a ladder: family (haiku < sonnet < opus < fable), then version.
+  1-token test call, keeps the two newest versions per family, and ranks them into a ladder: family
+  (haiku < sonnet < opus < fable), then version.
   Cached for 24h. A model that later fails without responding (e.g. a family needing API credits) is
   dropped and the turn retries one rung down.
 - **Routing**: the newest model of the weakest family rates each prompt 1-10 (with the previous prompt

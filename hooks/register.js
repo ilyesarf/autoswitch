@@ -3,6 +3,8 @@
 // Weakest to strongest. Within a family, higher versions rank higher.
 const FAMILIES = ['haiku', 'sonnet', 'opus', 'fable']
 const LADDER_TTL_MS = 24 * 60 * 60 * 1000
+// Older versions only add weak rungs; the previous version is still a useful downgrade.
+const VERSIONS_PER_FAMILY = 2
 
 let ladder = [] // [{ id, family, version, window }], weakest first
 
@@ -19,6 +21,12 @@ function compareModels(a, b) {
     if (d) return d
   }
   return 0
+}
+
+// Sorted weakest first, keeping only the newest versions of each family.
+function newestPerFamily(models) {
+  const sorted = [...models].sort(compareModels)
+  return sorted.filter(m => sorted.filter(o => o.family === m.family && compareModels(o, m) > 0).length < VERSIONS_PER_FAMILY)
 }
 
 async function listModels($) {
@@ -46,12 +54,12 @@ async function usable($, model) {
 
 async function discover($, force) {
   const cached = await $.store.get('ladder')
-  if (!force && cached && Date.now() - cached.at < LADDER_TTL_MS) return cached.models
-  const listed = await listModels($)
+  if (!force && cached && Date.now() - cached.at < LADDER_TTL_MS) return newestPerFamily(cached.models)
+  const listed = newestPerFamily(await listModels($))
   const checks = []
   for (const m of listed) checks.push(usable($, m))
   const ok = await Promise.all(checks)
-  const models = listed.filter((m, i) => ok[i]).sort(compareModels)
+  const models = listed.filter((m, i) => ok[i])
   if (models.length) await $.store.set('ladder', { at: Date.now(), models })
   return models
 }
