@@ -106,7 +106,8 @@ async function markFailed($, id) {
 function describeLadder() {
   if (!ladder.length) return 'No models discovered yet.'
   return 'Ladder (weakest → strongest):\n' +
-    ladder.map((m, i) => `  ${i + 1}. ${m.id}${m.id === current ? '  ← current' : ''}`).join('\n')
+    ladder.map((m, i) => `  ${i + 1}. ${m.id}${m.id === current ? '  ← current' : ''}`).join('\n') +
+    `\nLast compaction: ${lastCompaction}`
 }
 
 const RUBRIC = `Rate how hard this request to a coding assistant is, from 1 to 10.
@@ -123,6 +124,7 @@ const USER_ORIGINS = ['composer', 'bridge', 'sdk']
 
 let current = null // model id the main conversation is routed to; null = the session's own
 let lastPrompt = ''
+let lastCompaction = 'none yet'
 
 // The newest model of the weakest family: cheap, but not an outdated judge.
 function rater() {
@@ -158,15 +160,26 @@ function pick(score) {
 }
 
 // A new model reads the whole conversation uncached, so a big context is compacted first.
-// It must also fit the target's window.
+// It must also fit the target's window. Returns what happened, so the reason is never silent:
+// 'no' (not needed), 'yes', or 'failed: <reason>'.
 async function compactIfNeeded($, target, threshold) {
-  // `tokens` comes from the last response; right after a resume there is none, so estimate locally.
-  const { context } = await $.session.usage({ breakdown: 'summary' })
-  const tokens = context?.tokens ?? context?.breakdown?.totalTokens ?? 0
+  let tokens = 0
+  try {
+    // `tokens` comes from the last response; right after a resume there is none, so estimate locally.
+    const { context } = await $.session.usage({ breakdown: 'summary' })
+    tokens = context?.tokens ?? context?.breakdown?.totalTokens ?? 0
+  } catch (err) {
+    return 'failed: usage ' + String(err?.message ?? err)
+  }
   const window = ladder.find(m => m.id === target)?.window ?? Infinity
-  if (tokens <= threshold && tokens < window) return false
-  const res = await $.session.compact()
-  return !res?.skip
+  if (tokens <= threshold && tokens < window) return 'no'
+  try {
+    const res = await $.session.compact()
+    // A hook vetoed it; the context is still as large as it was.
+    return res?.skip ? 'failed: ' + res.skip : 'yes'
+  } catch (err) {
+    return 'failed: ' + String(err?.message ?? err)
+  }
 }
 
 export function register(on, options) {
@@ -213,8 +226,15 @@ export function register(on, options) {
 
     const previous = current ?? await $.session.model()
     if (chosen !== previous) {
-      const compacted = await compactIfNeeded($, chosen, threshold).catch(() => false)
-      $.ui.toast(`autoswitch → ${chosen} (${why}${compacted ? ', compacted' : ''})`)
+      const compaction = await compactIfNeeded($, chosen, threshold)
+      lastCompaction = compaction
+      if (compaction.startsWith('failed') && !forcedId) {
+        // Switching now would make the new model re-read a context too big to be worth it.
+        $.ui.toast(`autoswitch: staying on ${previous}, compaction ${compaction}`)
+        return next(e)
+      }
+      const note = compaction === 'yes' ? ', compacted' : compaction === 'no' ? '' : ', ' + compaction
+      $.ui.toast(`autoswitch → ${chosen} (${why}${note})`)
     }
     current = chosen
     return next(forcedId ? { ...e, text } : e)
