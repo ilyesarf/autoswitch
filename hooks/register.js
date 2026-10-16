@@ -206,9 +206,17 @@ async function compactNow($) {
   }
 }
 
+// A dropped prompt lands back in the box, where it looks like it never went through. Take it
+// out, but leave anything else alone: by then the person may have typed something new.
+async function clearIfDropped($, text) {
+  const box = await $.prompt.read().catch(() => null)
+  if (box && box.text.trim() === text.trim()) await $.prompt.fill({ text: '' }).catch(() => {})
+}
+
 // The host refuses compaction while prompt.submit holds the prompt, so a downgrade drops it,
 // compacts once the session is idle, and re-sends it to the cheaper model.
 async function compactThenResend($, text, previous, target, why) {
+  await clearIfDropped($, text)
   lastCompaction = await compactNow($)
   if (lastCompaction === 'yes') {
     current = target
@@ -218,8 +226,8 @@ async function compactThenResend($, text, previous, target, why) {
     $.ui.toast(`autoswitch: staying on ${previous}, compaction ${lastCompaction}`)
   }
   $.ui.invalidate('ui.render')
-  // The dropped text went back into the prompt box; it's being sent, so clear it.
-  await $.prompt.fill({ text: '' }).catch(() => {})
+  // Again, in case the host put the text back while compaction ran.
+  await clearIfDropped($, text)
   try {
     await $.prompt.submit({ text, asUser: true })
   } catch {

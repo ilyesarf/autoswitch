@@ -35,8 +35,12 @@ function stubSession(on, { model, tokens, score, store = new Map(), compactSkip 
     calls.sent.push(e.text)
     return { text: e.text }
   })
+  // The prompt box, the way the host leaves it: a dropped prompt goes back into it.
+  let box = ''
+  on('prompt.read', () => ({ value: { text: box, cursor: box.length } }))
   on('prompt.fill', ($, e) => {
     calls.filled.push(e.text)
+    box = e.text
     return { isFilled: true }
   })
   let suffix
@@ -44,7 +48,7 @@ function stubSession(on, { model, tokens, score, store = new Map(), compactSkip 
     suffix = e.props.suffix
     return { type: 'Text', props: {}, children: ['spinner'] }
   })
-  return { calls, store, spinner: async ($) => {
+  return { calls, store, setBox: (t) => { box = t }, getBox: () => box, spinner: async ($) => {
     const ui = await $.ui.mount({
       plugin: 'autoswitch', surface: 'terminal', component: 'Spinner', requestId: 'main',
       props: { word: 'Thinking', message: null, suffix: '…', mode: 'thinking' },
@@ -62,9 +66,12 @@ test('a downgrade with a big context compacts first, then re-sends the prompt to
   // Dropped: the host refuses compaction while the prompt is held.
   expect(first.drop).toMatch(/compacting before switching to haiku-5-5/)
   expect(s.calls.compact).toBe(0)
+  s.setBox('thanks') // the host puts a dropped prompt back in the box
   await clock.advance(0)
   expect(s.calls.compact).toBe(1)
+  // Cleared, so the person doesn't see their prompt sitting there unsent.
   expect(s.calls.filled).toEqual([''])
+  expect(s.getBox()).toBe('')
   // The user's prompt went through once (the drop) and was re-sent once, unchanged.
   expect(s.calls.sent).toEqual(['thanks'])
   expect(await s.spinner($)).toBe('… · haiku-5-5')
@@ -77,6 +84,16 @@ test('if compaction fails, the prompt is re-sent to the current model', async ($
   await clock.advance(0)
   expect(s.calls.sent).toEqual(['thanks'])
   expect(await s.spinner($)).toBe('… · opus-5-5')
+})
+
+test('a draft typed while compaction runs is left in the prompt box', async ($, on) => {
+  const clock = mock.clock(on)
+  const s = stubSession(on, { model: 'claude-opus-5-5', tokens: 200000, score: 1 })
+  await $.prompt.submit(prompt('thanks'))
+  s.setBox('wait, also check the ladder') // typed after the drop, before compaction ends
+  await clock.advance(0)
+  expect(s.getBox()).toBe('wait, also check the ladder')
+  expect(s.calls.sent).toEqual(['thanks'])
 })
 
 test('a downgrade with a small context switches right away', async ($, on) => {
