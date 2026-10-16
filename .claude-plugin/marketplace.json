@@ -1,0 +1,12 @@
+{
+  "name": "autoswitch",
+  "description": "autoswitch: picks a model for each Claude Code prompt by rating its difficulty",
+  "owner": { "name": "esc" },
+  "plugins": [
+    {
+      "name": "autoswitch",
+      "source": "./",
+      "description": "Picks a model for each prompt by rating its difficulty, so you don't have to /model by hand"
+    }
+  ]
+}
