@@ -6,7 +6,8 @@ const LADDER_TTL_MS = 24 * 60 * 60 * 1000
 // Older versions only add weak rungs; the previous version is still a useful downgrade.
 const VERSIONS_PER_FAMILY = 2
 
-let ladder = [] // [{ id, family, version, window }], weakest first
+let ladder = [] // [{ id, family, version, window, created }], weakest first
+let maxAgeDays = 180
 
 // "claude-sonnet-4-5-20250929" -> [4, 5]; a trailing date is not part of the version.
 function parseVersion(id, family) {
@@ -23,9 +24,10 @@ function compareModels(a, b) {
   return 0
 }
 
-// Sorted weakest first, keeping only the newest versions of each family.
-function newestPerFamily(models) {
-  const sorted = [...models].sort(compareModels)
+// Sorted weakest first: models released within maxAgeDays, newest versions of each family only.
+function trim(models) {
+  const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000
+  const sorted = models.filter(m => Date.parse(m.created) >= cutoff).sort(compareModels)
   return sorted.filter(m => sorted.filter(o => o.family === m.family && compareModels(o, m) > 0).length < VERSIONS_PER_FAMILY)
 }
 
@@ -39,7 +41,7 @@ async function listModels($) {
   if (!res.ok) return []
   return JSON.parse(res.text).data
     .filter(m => m.lifecycle === 'active' && FAMILIES.includes(m.line))
-    .map(m => ({ id: m.id, family: m.line, version: parseVersion(m.id, m.line), window: m.max_input_tokens }))
+    .map(m => ({ id: m.id, family: m.line, version: parseVersion(m.id, m.line), window: m.max_input_tokens, created: m.created_at }))
 }
 
 // Listed is not the same as usable (e.g. a family that needs API credits), so try each one.
@@ -54,8 +56,9 @@ async function usable($, model) {
 
 async function discover($, force) {
   const cached = await $.store.get('ladder')
-  if (!force && cached && Date.now() - cached.at < LADDER_TTL_MS) return newestPerFamily(cached.models)
-  const listed = newestPerFamily(await listModels($))
+  const fresh = cached && Date.now() - cached.at < LADDER_TTL_MS && cached.models.every(m => m.created)
+  if (!force && fresh) return trim(cached.models)
+  const listed = trim(await listModels($))
   const checks = []
   for (const m of listed) checks.push(usable($, m))
   const ok = await Promise.all(checks)
@@ -132,6 +135,7 @@ async function compactIfNeeded($, target, threshold) {
 
 export function register(on, options) {
   const threshold = options?.compact_threshold ?? 100000
+  maxAgeDays = options?.max_model_age_days ?? maxAgeDays
 
   on('session.start', async ($, e, next) => {
     await $.command.register({

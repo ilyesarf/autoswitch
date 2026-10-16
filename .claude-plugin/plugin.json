@@ -12,6 +12,13 @@
       "description": "When switching models with more context than this, compact first so the new model doesn't re-read it all uncached",
       "default": 100000,
       "min": 0
+    },
+    "max_model_age_days": {
+      "type": "number",
+      "title": "Max model age (days)",
+      "description": "Models released longer ago than this are left off the ladder",
+      "default": 180,
+      "min": 1
     }
   }
 }
