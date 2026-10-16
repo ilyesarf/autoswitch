@@ -9,8 +9,9 @@ How it works:
   1-token test call, drops models released more than `max_model_age_days` ago (default 180, in
   `/config`), keeps the two newest versions per family, and ranks them into a ladder: family
   (haiku < sonnet < opus < fable), then version.
-  Cached for 24h. A model that later fails without responding (e.g. a family needing API credits) is
-  dropped and the turn retries one rung down.
+  Cached for 24h. A model that later fails without responding is dropped and the turn retries one rung
+  down. If paid credits are off when that happens, the model is remembered as needing credits and is
+  skipped (no test call) until credits are on again; a change in credit state rebuilds the ladder.
 - **Routing**: the newest model of the weakest family rates each prompt 1-10 (with the previous prompt
   as context), and the score maps onto the ladder. Small moves of one rung are ignored so the cache
   isn't thrown away for nothing. Subagents are left alone.

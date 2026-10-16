@@ -54,17 +54,53 @@ async function usable($, model) {
   }
 }
 
+// Whether paid usage credits are on, from the account usage endpoint /usage reads.
+// Undocumented, so anything unexpected counts as off.
+async function hasCredits($) {
+  try {
+    const auth = await $.session.authorize()
+    if (!auth) return false
+    const res = await $.http.fetch('https://api.anthropic.com/api/oauth/usage', {
+      auth: auth.handle,
+      headers: { 'anthropic-version': '2023-06-01', 'anthropic-beta': 'oauth-2025-04-20' },
+    })
+    return res.ok && JSON.parse(res.text).extra_usage?.is_enabled === true
+  } catch {
+    return false
+  }
+}
+
+// Models that once failed while credits were off. The 1-token check passes for them
+// anyway, so it can't be trusted for these.
+async function needsCredits($) {
+  return (await $.store.get('needsCredits')) ?? []
+}
+
 async function discover($, force) {
+  const credits = await hasCredits($)
   const cached = await $.store.get('ladder')
-  const fresh = cached && Date.now() - cached.at < LADDER_TTL_MS && cached.models.every(m => m.created)
+  const fresh = cached && Date.now() - cached.at < LADDER_TTL_MS &&
+    cached.credits === credits && cached.models.every(m => m.created)
   if (!force && fresh) return trim(cached.models)
-  const listed = trim(await listModels($))
+  const skip = credits ? [] : await needsCredits($)
+  const listed = trim(await listModels($)).filter(m => !skip.includes(m.id))
   const checks = []
   for (const m of listed) checks.push(usable($, m))
   const ok = await Promise.all(checks)
   const models = listed.filter((m, i) => ok[i])
-  if (models.length) await $.store.set('ladder', { at: Date.now(), models })
+  if (models.length) await $.store.set('ladder', { at: Date.now(), models, credits })
   return models
+}
+
+// A model failed a real request: if credits are off, that's why, so remember it.
+// Otherwise it's dropped for this session only.
+async function markFailed($, id) {
+  ladder = ladder.filter(m => m.id !== id)
+  if (await hasCredits($)) return
+  const known = await needsCredits($)
+  if (!known.includes(id)) await $.store.set('needsCredits', [...known, id])
+  const cached = await $.store.get('ladder')
+  if (cached) await $.store.set('ladder', { ...cached, models: cached.models.filter(m => m.id !== id) })
 }
 
 function describeLadder() {
@@ -206,7 +242,7 @@ export function register(on, options) {
       }
       const result = step.value
       // A request that failed before any response (e.g. no credits for that model):
-      // drop the model for good and retry one rung down.
+      // drop the model and retry one rung down.
       const failed = held !== null && result?.stopReason == null && !next.signal.aborted
       if (!failed) for (const chunk of held ?? []) yield chunk
       const at = ladder.findIndex(m => m.id === current)
@@ -216,8 +252,7 @@ export function register(on, options) {
         return result
       }
       const dropped = current
-      ladder = ladder.filter(m => m.id !== dropped)
-      await $.store.set('ladder', { at: Date.now(), models: ladder })
+      await markFailed($, dropped)
       current = ladder[at - 1].id
       $.ui.toast(`autoswitch: ${dropped} failed, using ${current}`)
     }
