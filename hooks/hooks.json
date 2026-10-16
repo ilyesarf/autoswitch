@@ -1,0 +1,4 @@
+{
+  "description": "autoswitch hooks module",
+  "modules": ["./register.js"]
+}
