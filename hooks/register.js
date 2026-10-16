@@ -58,7 +58,56 @@ async function discover($, force) {
 
 function describeLadder() {
   if (!ladder.length) return 'No models discovered yet.'
-  return 'Ladder (weakest → strongest):\n' + ladder.map((m, i) => `  ${i + 1}. ${m.id}`).join('\n')
+  return 'Ladder (weakest → strongest):\n' +
+    ladder.map((m, i) => `  ${i + 1}. ${m.id}${m.id === current ? '  ← current' : ''}`).join('\n')
+}
+
+const RUBRIC = `Rate how hard this request to a coding assistant is, from 1 to 10.
+1-2: chit-chat, acknowledgements, trivial questions or one-line edits.
+3-5: routine, well-scoped work.
+6-8: multi-step work that needs care and judgment.
+9-10: ambiguous, open-ended, or deep problems: architecture, tricky debugging, large changes.
+Reply with the number only.`
+
+const OVERRIDE = /^\s*!([\w.-]+)\s*/
+
+// Prompts the user sent themselves; notifications and plugin prompts keep the current model.
+const USER_ORIGINS = ['composer', 'bridge', 'sdk']
+
+let current = null // model id the main conversation is routed to; null = the session's own
+let lastPrompt = ''
+
+// The newest model of the weakest family: cheap, but not an outdated judge.
+function rater() {
+  const weakest = ladder.filter(m => m.family === ladder[0].family)
+  return weakest[weakest.length - 1].id
+}
+
+async function rate($, text) {
+  const prompt = RUBRIC +
+    (lastPrompt ? `\n\nPrevious request, for context only:\n${lastPrompt.slice(0, 2000)}` : '') +
+    `\n\nRequest to rate:\n${text.slice(0, 4000)}`
+  const reply = await $.model.complete({ model: rater(), prompt, maxTokens: 5 })
+  // Newer builds answer { text, usage }, older ones a plain string.
+  const answer = typeof reply === 'string' ? reply : reply?.text ?? ''
+  const score = Number(answer.match(/\d+/)?.[0])
+  return score >= 1 && score <= 10 ? score : null
+}
+
+// "!opus" -> strongest opus; "!sonnet-5" -> claude-sonnet-5 exactly.
+function findOverride(name) {
+  const exact = ladder.find(m => m.id === name || m.id === 'claude-' + name)
+  if (exact) return exact.id
+  const matches = ladder.filter(m => m.id.includes(name))
+  return matches.length ? matches[matches.length - 1].id : null
+}
+
+// Don't hop one rung for a slightly different score: every switch costs a cold cache.
+function pick(score) {
+  const target = Math.round(((score - 1) / 9) * (ladder.length - 1))
+  const at = ladder.findIndex(m => m.id === current)
+  if (at !== -1 && Math.abs(target - at) <= 1) return current
+  return ladder[target].id
 }
 
 export function register(on) {
@@ -77,5 +126,70 @@ export function register(on) {
     if (e.args.trim() === 'refresh') ladder = await discover($, true)
     else if (!ladder.length) ladder = await discover($, false)
     return { text: describeLadder() }
+  })
+
+  on('prompt.submit', async ($, e, next) => {
+    if (!USER_ORIGINS.includes(e.origin?.kind)) return next(e)
+    if (!ladder.length) ladder = await discover($, false).catch(() => [])
+    if (!ladder.length) return next(e)
+
+    const forced = e.text.match(OVERRIDE)
+    const forcedId = forced && findOverride(forced[1].toLowerCase())
+    const text = forcedId ? e.text.replace(OVERRIDE, '') : e.text
+
+    let chosen = forcedId
+    let why = 'forced'
+    if (!chosen) {
+      const score = await rate($, text).catch(() => null)
+      lastPrompt = text
+      // Rating failed: leave the model as it is.
+      if (score === null) return next(e)
+      chosen = pick(score)
+      why = 'score ' + score
+    }
+    lastPrompt = text
+
+    if (chosen !== current) $.ui.toast(`autoswitch → ${chosen} (${why})`)
+    current = chosen
+    return next(forcedId ? { ...e, text } : e)
+  })
+
+  // Main conversation only; subagents keep whatever model they were given.
+  on('turn.step', async function* ($, e, next) {
+    if (!current || e.agentId) return yield* next(e)
+    while (true) {
+      const stream = next({ ...e, model: current })
+      // Engine chunks are held until the model produces something, so the error
+      // notice of a failed request can be dropped instead of shown.
+      let held = []
+      let step
+      while (!(step = await stream.next()).done) {
+        if (held && step.value.kind === 'engine') {
+          held.push(step.value)
+          continue
+        }
+        if (held) {
+          for (const chunk of held) yield chunk
+          held = null
+        }
+        yield step.value
+      }
+      const result = step.value
+      // A request that failed before any response (e.g. no credits for that model):
+      // drop the model for good and retry one rung down.
+      const failed = held !== null && result?.stopReason == null && !next.signal.aborted
+      if (!failed) for (const chunk of held ?? []) yield chunk
+      const at = ladder.findIndex(m => m.id === current)
+      if (!failed) return result
+      if (at <= 0) {
+        for (const chunk of held) yield chunk
+        return result
+      }
+      const dropped = current
+      ladder = ladder.filter(m => m.id !== dropped)
+      await $.store.set('ladder', { at: Date.now(), models: ladder })
+      current = ladder[at - 1].id
+      $.ui.toast(`autoswitch: ${dropped} failed, using ${current}`)
+    }
   })
 }
