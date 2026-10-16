@@ -76,8 +76,17 @@ async function needsCredits($) {
   return (await $.store.get('needsCredits')) ?? []
 }
 
+// Models that have answered a real request while credits were off, so a later failure
+// is something transient, not missing credits.
+async function worked($) {
+  return (await $.store.get('worked')) ?? []
+}
+
+let creditsOn = null // as last seen by discover
+
 async function discover($, force) {
   const credits = await hasCredits($)
+  creditsOn = credits
   const cached = await $.store.get('ladder')
   const fresh = cached && Date.now() - cached.at < LADDER_TTL_MS &&
     cached.credits === credits && cached.models.every(m => m.created)
@@ -92,15 +101,22 @@ async function discover($, force) {
   return models
 }
 
-// A model failed a real request: if credits are off, that's why, so remember it.
-// Otherwise it's dropped for this session only.
+// A model failed a real request. If credits are off and it has never answered without them,
+// missing credits is why, so remember it. Otherwise it's dropped for this session only.
 async function markFailed($, id) {
   ladder = ladder.filter(m => m.id !== id)
   if (await hasCredits($)) return
+  if ((await worked($)).includes(id)) return
   const known = await needsCredits($)
   if (!known.includes(id)) await $.store.set('needsCredits', [...known, id])
   const cached = await $.store.get('ladder')
   if (cached) await $.store.set('ladder', { ...cached, models: cached.models.filter(m => m.id !== id) })
+}
+
+async function markWorked($, id) {
+  if (creditsOn !== false) return
+  const known = await worked($)
+  if (!known.includes(id)) await $.store.set('worked', [...known, id])
 }
 
 function describeLadder() {
@@ -125,6 +141,9 @@ const USER_ORIGINS = ['composer', 'bridge', 'sdk']
 let current = null // model id the main conversation is routed to; null = the session's own
 let lastPrompt = ''
 let lastCompaction = 'none yet'
+// A downgrade waiting for the turn to end, so the conversation can be compacted first
+// (the host refuses compaction inside prompt.submit). { target, why }
+let pending = null
 const subagents = new Set() // agent ids seen in turn.step, so their spinners are left alone
 
 // "claude-sonnet-4-5-20250929" -> "sonnet-4-5"
@@ -165,20 +184,22 @@ function pick(score) {
   return ladder[target].id
 }
 
-// A new model reads the whole conversation uncached, so a big context is compacted first.
-// It must also fit the target's window. Returns what happened, so the reason is never silent:
-// 'no' (not needed), 'yes', or 'failed: <reason>'.
-async function compactIfNeeded($, target, threshold) {
-  let tokens = 0
+// A new model reads the whole conversation uncached, so a big context should be compacted
+// before it does. It must also fit the target's window.
+async function needsCompaction($, target, threshold) {
   try {
     // `tokens` comes from the last response; right after a resume there is none, so estimate locally.
     const { context } = await $.session.usage({ breakdown: 'summary' })
-    tokens = context?.tokens ?? context?.breakdown?.totalTokens ?? 0
-  } catch (err) {
-    return 'failed: usage ' + String(err?.message ?? err)
+    const tokens = context?.tokens ?? context?.breakdown?.totalTokens ?? 0
+    const window = ladder.find(m => m.id === target)?.window ?? Infinity
+    return tokens > threshold || tokens >= window
+  } catch {
+    return false
   }
-  const window = ladder.find(m => m.id === target)?.window ?? Infinity
-  if (tokens <= threshold && tokens < window) return 'no'
+}
+
+// 'yes' or 'failed: <reason>', so the reason is never silent.
+async function compactNow($) {
   try {
     const res = await $.session.compact()
     // A hook vetoed it; the context is still as large as it was.
@@ -188,6 +209,12 @@ async function compactIfNeeded($, target, threshold) {
   }
 }
 
+// A higher rung than the current one; a model off the ladder counts as the top.
+function isUpgrade(from, to) {
+  const a = ladder.findIndex(m => m.id === from)
+  return a === -1 || ladder.findIndex(m => m.id === to) > a
+}
+
 export function register(on, options) {
   const threshold = options?.compact_threshold ?? 100000
   maxAgeDays = options?.max_model_age_days ?? maxAgeDays
@@ -195,8 +222,8 @@ export function register(on, options) {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'autoswitch',
-      description: 'Show the model ladder; "refresh" re-discovers models',
-      argumentHint: '[refresh]',
+      description: 'Show the model ladder; "refresh" re-discovers models, "reset" also forgets learned credit failures',
+      argumentHint: '[refresh|reset]',
     })
     // Don't hold up the session; switching starts once the ladder is known.
     discover($, false).then(models => { ladder = models }, () => {})
@@ -204,7 +231,9 @@ export function register(on, options) {
   })
 
   on('command.run', { command: 'autoswitch' }, async ($, e) => {
-    if (e.args.trim() === 'refresh') ladder = await discover($, true)
+    const arg = e.args.trim()
+    if (arg === 'reset') await $.store.set('needsCredits', [])
+    if (arg === 'refresh' || arg === 'reset') ladder = await discover($, true)
     else if (!ladder.length) ladder = await discover($, false)
     return { text: describeLadder() }
   })
@@ -231,16 +260,19 @@ export function register(on, options) {
     lastPrompt = text
 
     const previous = current ?? await $.session.model()
+    pending = null
     if (chosen !== previous) {
-      const compaction = await compactIfNeeded($, chosen, threshold)
-      lastCompaction = compaction
-      if (compaction.startsWith('failed') && !forcedId) {
-        // Switching now would make the new model re-read a context too big to be worth it.
-        $.ui.toast(`autoswitch: staying on ${previous}, compaction ${compaction}`)
-        return next(e)
+      // Going down with a big context: this turn stays on the stronger model, the conversation
+      // is compacted when it ends, and the cheaper model takes over from the next prompt.
+      // Going up, or forced: switch now; a hard prompt shouldn't wait on a weaker model.
+      if (!forcedId && !isUpgrade(previous, chosen) && await needsCompaction($, chosen, threshold)) {
+        pending = { target: chosen, why }
+        current = previous
+        $.ui.toast(`autoswitch: ${shortName(chosen)} from the next prompt, compacting after this turn (${why})`)
+        $.ui.invalidate('ui.render')
+        return next(forcedId ? { ...e, text } : e)
       }
-      const note = compaction === 'yes' ? ', compacted' : compaction === 'no' ? '' : ', ' + compaction
-      $.ui.toast(`autoswitch → ${chosen} (${why}${note})`)
+      $.ui.toast(`autoswitch → ${chosen} (${why})`)
     }
     current = chosen
     $.ui.invalidate('ui.render')
@@ -274,7 +306,10 @@ export function register(on, options) {
       const failed = held !== null && result?.stopReason == null && !next.signal.aborted
       if (!failed) for (const chunk of held ?? []) yield chunk
       const at = ladder.findIndex(m => m.id === current)
-      if (!failed) return result
+      if (!failed) {
+        if (result?.stopReason != null) await markWorked($, current).catch(() => {})
+        return result
+      }
       if (at <= 0) {
         for (const chunk of held) yield chunk
         return result
@@ -285,6 +320,22 @@ export function register(on, options) {
       $.ui.invalidate('ui.render')
       $.ui.toast(`autoswitch: ${dropped} failed, using ${current}`)
     }
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    const result = await next(e)
+    if (!pending || e.agentId || e.isAborted) return result
+    const { target, why } = pending
+    pending = null
+    lastCompaction = await compactNow($)
+    if (lastCompaction === 'yes') {
+      current = target
+      $.ui.toast(`autoswitch → ${target} (${why}, compacted)`)
+    } else {
+      $.ui.toast(`autoswitch: staying on ${current}, compaction ${lastCompaction}`)
+    }
+    $.ui.invalidate('ui.render')
+    return result
   })
 
   // /model shows the configured model, not the one answering, so show the routed one here.
