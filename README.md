@@ -23,7 +23,8 @@ Or run it from a local clone: `claude --plugin-dir /path/to/autoswitch`
 
 ## Use
 
-Just prompt as usual. A toast shows when it switches.
+Just prompt as usual. A toast shows when it switches, and the model actually answering shows in the
+spinner (`Thinking… · sonnet-5`) and under the prompt. `/model` keeps showing your configured default.
 
 - `!<model> prompt` forces a model: `!opus`, `!sonnet-5`, `!haiku-5-5`
 - `/autoswitch` shows the model ladder, `/autoswitch refresh` rebuilds it

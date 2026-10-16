@@ -125,6 +125,12 @@ const USER_ORIGINS = ['composer', 'bridge', 'sdk']
 let current = null // model id the main conversation is routed to; null = the session's own
 let lastPrompt = ''
 let lastCompaction = 'none yet'
+const subagents = new Set() // agent ids seen in turn.step, so their spinners are left alone
+
+// "claude-sonnet-4-5-20250929" -> "sonnet-4-5"
+function shortName(id) {
+  return id.replace(/^claude-/, '').replace(/-\d{8}$/, '')
+}
 
 // The newest model of the weakest family: cheap, but not an outdated judge.
 function rater() {
@@ -237,11 +243,13 @@ export function register(on, options) {
       $.ui.toast(`autoswitch → ${chosen} (${why}${note})`)
     }
     current = chosen
+    $.ui.invalidate('ui.render')
     return next(forcedId ? { ...e, text } : e)
   })
 
   // Main conversation only; subagents keep whatever model they were given.
   on('turn.step', async function* ($, e, next) {
+    if (e.agentId) subagents.add(e.agentId)
     if (!current || e.agentId) return yield* next(e)
     while (true) {
       const stream = next({ ...e, model: current })
@@ -274,7 +282,20 @@ export function register(on, options) {
       const dropped = current
       await markFailed($, dropped)
       current = ladder[at - 1].id
+      $.ui.invalidate('ui.render')
       $.ui.toast(`autoswitch: ${dropped} failed, using ${current}`)
     }
+  })
+
+  // /model shows the configured model, not the one answering, so show the routed one here.
+  on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
+    if (!current || subagents.has(e.requestId)) return next(e)
+    return next({ ...e, props: { ...e.props, suffix: e.props.suffix + ' · ' + shortName(current) } })
+  })
+
+  on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
+    if (!current || e.props.isDraft) return next(e)
+    const label = 'autoswitch: ' + shortName(current)
+    return next({ ...e, props: { ...e.props, hint: e.props.hint ? e.props.hint + ' · ' + label : label } })
   })
 }
