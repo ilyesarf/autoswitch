@@ -2,5 +2,16 @@
   "name": "autoswitch",
   "version": "0.1.0",
   "description": "Picks a model for each prompt by rating its difficulty, so you don't have to /model by hand",
-  "author": { "name": "esc" }
+  "author": {
+    "name": "esc"
+  },
+  "userConfig": {
+    "compact_threshold": {
+      "type": "number",
+      "title": "Compact threshold (tokens)",
+      "description": "When switching models with more context than this, compact first so the new model doesn't re-read it all uncached",
+      "default": 100000,
+      "min": 0
+    }
+  }
 }

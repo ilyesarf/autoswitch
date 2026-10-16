@@ -110,7 +110,21 @@ function pick(score) {
   return ladder[target].id
 }
 
-export function register(on) {
+// A new model reads the whole conversation uncached, so a big context is compacted first.
+// It must also fit the target's window.
+async function compactIfNeeded($, target, threshold) {
+  // `tokens` comes from the last response; right after a resume there is none, so estimate locally.
+  const { context } = await $.session.usage({ breakdown: 'summary' })
+  const tokens = context?.tokens ?? context?.breakdown?.totalTokens ?? 0
+  const window = ladder.find(m => m.id === target)?.window ?? Infinity
+  if (tokens <= threshold && tokens < window) return false
+  const res = await $.session.compact()
+  return !res?.skip
+}
+
+export function register(on, options) {
+  const threshold = options?.compact_threshold ?? 100000
+
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'autoswitch',
@@ -149,7 +163,11 @@ export function register(on) {
     }
     lastPrompt = text
 
-    if (chosen !== current) $.ui.toast(`autoswitch → ${chosen} (${why})`)
+    const previous = current ?? await $.session.model()
+    if (chosen !== previous) {
+      const compacted = await compactIfNeeded($, chosen, threshold).catch(() => false)
+      $.ui.toast(`autoswitch → ${chosen} (${why}${compacted ? ', compacted' : ''})`)
+    }
     current = chosen
     return next(forcedId ? { ...e, text } : e)
   })
