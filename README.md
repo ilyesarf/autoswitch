@@ -35,5 +35,5 @@ spinner (`Thinking… · sonnet-5`) and under the prompt. `/model` keeps showing
 
 1. **Discover**: lists your usable models (two newest per family, released in the last 180 days) and ranks them haiku < sonnet < opus < fable, then by version.
 2. **Rate**: a cheap model scores each prompt 1-10, and the score picks a rung on the ladder.
-3. **Switch**: going up switches right away. Going down with a large context finishes the turn on the
-   current model, compacts, and switches from the next prompt. A model that fails is dropped and the turn retries one rung down. Models that need paid credits are skipped while your credits are off.
+3. **Switch**: going up switches right away. Going down with a large context holds your prompt,
+   compacts, then re-sends it to the cheaper model. A model that fails is dropped and the turn retries one rung down. Models that need paid credits are skipped while your credits are off.

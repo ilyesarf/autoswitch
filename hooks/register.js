@@ -141,9 +141,6 @@ const USER_ORIGINS = ['composer', 'bridge', 'sdk']
 let current = null // model id the main conversation is routed to; null = the session's own
 let lastPrompt = ''
 let lastCompaction = 'none yet'
-// A downgrade waiting for the turn to end, so the conversation can be compacted first
-// (the host refuses compaction inside prompt.submit). { target, why }
-let pending = null
 const subagents = new Set() // agent ids seen in turn.step, so their spinners are left alone
 
 // "claude-sonnet-4-5-20250929" -> "sonnet-4-5"
@@ -209,6 +206,27 @@ async function compactNow($) {
   }
 }
 
+// The host refuses compaction while prompt.submit holds the prompt, so a downgrade drops it,
+// compacts once the session is idle, and re-sends it to the cheaper model.
+async function compactThenResend($, text, previous, target, why) {
+  lastCompaction = await compactNow($)
+  if (lastCompaction === 'yes') {
+    current = target
+    $.ui.toast(`autoswitch → ${target} (${why}, compacted)`)
+  } else {
+    current = previous
+    $.ui.toast(`autoswitch: staying on ${previous}, compaction ${lastCompaction}`)
+  }
+  $.ui.invalidate('ui.render')
+  // The dropped text went back into the prompt box; it's being sent, so clear it.
+  await $.prompt.fill({ text: '' }).catch(() => {})
+  try {
+    await $.prompt.submit({ text, asUser: true })
+  } catch {
+    await $.prompt.submit({ text })
+  }
+}
+
 // A higher rung than the current one; a model off the ladder counts as the top.
 function isUpgrade(from, to) {
   const a = ladder.findIndex(m => m.id === from)
@@ -260,17 +278,14 @@ export function register(on, options) {
     lastPrompt = text
 
     const previous = current ?? await $.session.model()
-    pending = null
     if (chosen !== previous) {
-      // Going down with a big context: this turn stays on the stronger model, the conversation
-      // is compacted when it ends, and the cheaper model takes over from the next prompt.
+      // Going down with a big context: compact first, so the cheaper model answers this very
+      // prompt from a small context. Prompts with attachments can't be re-sent as they were.
       // Going up, or forced: switch now; a hard prompt shouldn't wait on a weaker model.
-      if (!forcedId && !isUpgrade(previous, chosen) && await needsCompaction($, chosen, threshold)) {
-        pending = { target: chosen, why }
-        current = previous
-        $.ui.toast(`autoswitch: ${shortName(chosen)} from the next prompt, compacting after this turn (${why})`)
-        $.ui.invalidate('ui.render')
-        return next(forcedId ? { ...e, text } : e)
+      const downgrade = !forcedId && !isUpgrade(previous, chosen)
+      if (downgrade && !e.attachments?.length && await needsCompaction($, chosen, threshold)) {
+        $.clock.after(0, () => { compactThenResend($, text, previous, chosen, why) })
+        return { drop: `autoswitch: compacting before switching to ${shortName(chosen)}, then re-sending your prompt` }
       }
       $.ui.toast(`autoswitch → ${chosen} (${why})`)
     }
@@ -320,22 +335,6 @@ export function register(on, options) {
       $.ui.invalidate('ui.render')
       $.ui.toast(`autoswitch: ${dropped} failed, using ${current}`)
     }
-  })
-
-  on('turn.complete', async ($, e, next) => {
-    const result = await next(e)
-    if (!pending || e.agentId || e.isAborted) return result
-    const { target, why } = pending
-    pending = null
-    lastCompaction = await compactNow($)
-    if (lastCompaction === 'yes') {
-      current = target
-      $.ui.toast(`autoswitch → ${target} (${why}, compacted)`)
-    } else {
-      $.ui.toast(`autoswitch: staying on ${current}, compaction ${lastCompaction}`)
-    }
-    $.ui.invalidate('ui.render')
-    return result
   })
 
   // /model shows the configured model, not the one answering, so show the routed one here.
