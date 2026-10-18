@@ -126,12 +126,20 @@ function describeLadder() {
     `\nLast compaction: ${lastCompaction}`
 }
 
-const RUBRIC = `Rate how hard this request to a coding assistant is, from 1 to 10.
-1-2: chit-chat, acknowledgements, trivial questions or one-line edits.
+const RUBRIC = `Rate how hard the next turn of this conversation is for a coding assistant, from 1 to 10.
+Rate the work the request asks for, not how long the request is. A short request to carry on
+("go", "continue", "yes", "now do it") is exactly as hard as the work it continues, which the
+conversation shows; an unfinished hard task is still hard.
+1-2: chit-chat, acknowledgements, trivial questions or one-line edits, or closing out finished work.
 3-5: routine, well-scoped work.
 6-8: multi-step work that needs care and judgment.
 9-10: ambiguous, open-ended, or deep problems: architecture, tricky debugging, large changes.
 Reply with the number only.`
+
+// How much conversation the rater reads. Enough to tell "go" with hard work in flight from "go"
+// once it is done, short enough that rating stays a cheap call.
+const CONTEXT_MESSAGES = 6
+const CONTEXT_CHARS = 600
 
 const OVERRIDE = /^\s*!([\w.-]+)\s*/
 
@@ -139,7 +147,6 @@ const OVERRIDE = /^\s*!([\w.-]+)\s*/
 const USER_ORIGINS = ['composer', 'bridge', 'sdk']
 
 let current = null // model id the main conversation is routed to; null = the session's own
-let lastPrompt = ''
 let lastCompaction = 'none yet'
 const subagents = new Set() // agent ids seen in turn.step, so their spinners are left alone
 
@@ -154,10 +161,29 @@ function rater() {
   return weakest[weakest.length - 1].id
 }
 
+// The tail of the conversation, oldest first: the work the next turn carries on from. Read from
+// the transcript, so it is there after a resume too, where a remembered prompt would not be.
+async function tail($) {
+  let messages
+  try {
+    messages = await $.session.messages()
+  } catch {
+    return ''
+  }
+  if (!Array.isArray(messages)) return ''
+  return messages.slice(-CONTEXT_MESSAGES).map(m => {
+    // Which tools ran says what kind of work is in flight; their output is too bulky to pass on.
+    const tools = (m.toolUses ?? []).map(u => u.tool).join(', ')
+    const body = [m.text?.slice(0, CONTEXT_CHARS), tools && `[ran: ${tools}]`].filter(Boolean).join(' ')
+    return body && `${m.role}: ${body}`
+  }).filter(Boolean).join('\n\n')
+}
+
 async function rate($, text) {
+  const context = await tail($)
   const prompt = RUBRIC +
-    (lastPrompt ? `\n\nPrevious request, for context only:\n${lastPrompt.slice(0, 2000)}` : '') +
-    `\n\nRequest to rate:\n${text.slice(0, 4000)}`
+    (context ? `\n\nThe conversation so far, for context:\n${context}` : '') +
+    `\n\nThe request to rate:\n${text.slice(0, 4000)}`
   const reply = await $.model.complete({ model: rater(), prompt, maxTokens: 5 })
   // Newer builds answer { text, usage }, older ones a plain string.
   const answer = typeof reply === 'string' ? reply : reply?.text ?? ''
@@ -173,12 +199,25 @@ function findOverride(name) {
   return matches.length ? matches[matches.length - 1].id : null
 }
 
-// Don't hop one rung for a slightly different score: every switch costs a cold cache.
-function pick(score) {
+// Which rung a model sits on. The session's own model can read as an alias ("opus", "sonnet[1m]"),
+// so fall back to the strongest rung the name matches; -1 for a model that is not on the ladder.
+function rungOf(id) {
+  const exact = ladder.findIndex(m => m.id === id)
+  if (exact !== -1) return exact
+  const name = String(id ?? '').replace(/^claude-/, '').replace(/\[.*$/, '')
+  if (!name) return -1
+  const matched = ladder.map((m, i) => (m.id.includes(name) ? i : -1)).filter(i => i !== -1)
+  return matched.length ? matched[matched.length - 1] : -1
+}
+
+// Walk to the rung the score names: straight up, since a hard prompt shouldn't wait on a weaker
+// model, but one rung at a time down, so a turn misread as easy costs a rung and not the whole
+// ladder. A stretch of easy prompts still walks to the bottom.
+function pick(score, from) {
   const target = Math.round(((score - 1) / 9) * (ladder.length - 1))
-  const at = ladder.findIndex(m => m.id === current)
-  if (at !== -1 && Math.abs(target - at) <= 1) return current
-  return ladder[target].id
+  const at = rungOf(from)
+  if (at === -1) return ladder[target].id
+  return ladder[target > at ? target : Math.max(target, at - 1)].id
 }
 
 // A new model reads the whole conversation uncached, so a big context should be compacted
@@ -237,8 +276,8 @@ async function compactThenResend($, text, previous, target, why) {
 
 // A higher rung than the current one; a model off the ladder counts as the top.
 function isUpgrade(from, to) {
-  const a = ladder.findIndex(m => m.id === from)
-  return a === -1 || ladder.findIndex(m => m.id === to) > a
+  const a = rungOf(from)
+  return a === -1 || rungOf(to) > a
 }
 
 export function register(on, options) {
@@ -273,20 +312,21 @@ export function register(on, options) {
     const forcedId = forced && findOverride(forced[1].toLowerCase())
     const text = forcedId ? e.text.replace(OVERRIDE, '') : e.text
 
+    // The rung to measure from. On the first prompt nothing is routed yet, and the model the
+    // person chose themselves is the anchor; without it a low score falls to the bottom rung.
+    const previous = current ?? await $.session.model()
+
     let chosen = forcedId
     let why = 'forced'
     if (!chosen) {
       const score = await rate($, text).catch(() => null)
-      lastPrompt = text
       // Rating failed: leave the model as it is.
       if (score === null) return next(e)
-      chosen = pick(score)
+      chosen = pick(score, previous)
       why = 'score ' + score
     }
-    lastPrompt = text
 
-    const previous = current ?? await $.session.model()
-    if (chosen !== previous) {
+    if (chosen !== previous && rungOf(chosen) !== rungOf(previous)) {
       // Going down with a big context: compact first, so the cheaper model answers this very
       // prompt from a small context. Prompts with attachments can't be re-sent as they were.
       // Going up, or forced: switch now; a hard prompt shouldn't wait on a weaker model.

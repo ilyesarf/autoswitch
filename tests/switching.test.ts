@@ -11,9 +11,10 @@ const LADDER = {
   ],
 }
 
-// A session on `model` with `tokens` of context, where the rater answers `score`.
-function stubSession(on, { model, tokens, score, store = new Map(), compactSkip = null }) {
-  const calls = { compact: 0, sent: [], filled: [] }
+// A session on `model` with `tokens` of context and `messages` in its transcript, where the
+// rater answers `score` (a number, or a function of the prompt the rater was sent).
+function stubSession(on, { model, tokens, score, messages = [], store = new Map(), compactSkip = null }) {
+  const calls = { compact: 0, sent: [], filled: [], rated: [] }
   store.set('ladder', LADDER)
   on('store.get', ($, e) => ({ value: store.get(e.key) }))
   on('store.set', ($, e) => {
@@ -28,7 +29,12 @@ function stubSession(on, { model, tokens, score, store = new Map(), compactSkip 
     if (compactSkip) return { skip: compactSkip }
     return { messages: [{ role: 'user', text: 'summary of the conversation', toolUses: [] }] }
   })
-  on('model.complete', () => ({ value: { isAnswered: true, text: String(score) } }))
+  on('session.messages', () => ({ value: messages }))
+  on('model.complete', ($, e) => {
+    calls.rated.push(e.prompt)
+    const rated = typeof score === 'function' ? score(e.prompt) : score
+    return { value: { isAnswered: true, text: String(rated) } }
+  })
   on('ui.toast', () => ({ value: undefined }))
   on('ui.invalidate', () => ({ value: undefined }))
   on('prompt.submit', ($, e) => {
@@ -64,7 +70,7 @@ test('a downgrade with a big context compacts first, then re-sends the prompt to
   const s = stubSession(on, { model: 'claude-opus-5-5', tokens: 200000, score: 1 })
   const first = await $.prompt.submit(prompt('thanks'))
   // Dropped: the host refuses compaction while the prompt is held.
-  expect(first.drop).toMatch(/compacting before switching to haiku-5-5/)
+  expect(first.drop).toMatch(/compacting before switching to sonnet-5/)
   expect(s.calls.compact).toBe(0)
   s.setBox('thanks') // the host puts a dropped prompt back in the box
   await clock.advance(0)
@@ -74,7 +80,7 @@ test('a downgrade with a big context compacts first, then re-sends the prompt to
   expect(s.getBox()).toBe('')
   // The user's prompt went through once (the drop) and was re-sent once, unchanged.
   expect(s.calls.sent).toEqual(['thanks'])
-  expect(await s.spinner($)).toBe('… · haiku-5-5')
+  expect(await s.spinner($)).toBe('… · sonnet-5')
 })
 
 test('if compaction fails, the prompt is re-sent to the current model', async ($, on) => {
@@ -99,8 +105,47 @@ test('a draft typed while compaction runs is left in the prompt box', async ($, 
 test('a downgrade with a small context switches right away', async ($, on) => {
   const s = stubSession(on, { model: 'claude-opus-5-5', tokens: 5000, score: 1 })
   await $.prompt.submit(prompt('thanks'))
-  expect(await s.spinner($)).toBe('… · haiku-5-5')
+  expect(await s.spinner($)).toBe('… · sonnet-5')
   expect(s.calls.compact).toBe(0)
+})
+
+// The bug this guards: a bare "go" rated on its own reads as chit-chat, and on the first prompt
+// there was no rung to measure from, so a resumed hard task fell from opus to haiku in one step.
+test('a short prompt is rated on the work in flight, not on its own length', async ($, on) => {
+  const s = stubSession(on, {
+    model: 'claude-opus-5-5',
+    tokens: 5000,
+    // A rater that answers 9 only when it was shown the work in flight, 1 on the prompt alone.
+    score: (asked) => (asked.includes('planner cases') ? 9 : 1),
+    messages: [
+      { role: 'user', text: 'compare the new planner against the baseline', toolUses: [] },
+      {
+        role: 'assistant',
+        text: 'The comparison copy builds. Next I will regenerate the manifests and run the same planner cases.',
+        toolUses: [{ tool_use_id: 't1', tool: 'Bash', input: {} }],
+      },
+    ],
+  })
+  await $.prompt.submit(prompt('go'))
+  // The tail reached the rater, tool names included.
+  expect(s.calls.rated[0]).toContain('planner cases')
+  expect(s.calls.rated[0]).toContain('[ran: Bash]')
+  expect(await s.spinner($)).toBe('… · opus-5-5')
+  expect(s.calls.compact).toBe(0)
+})
+
+test('a run of trivial prompts walks down a rung at a time', async ($, on) => {
+  const s = stubSession(on, { model: 'claude-opus-5-5', tokens: 5000, score: 1 })
+  await $.prompt.submit(prompt('thanks'))
+  expect(await s.spinner($)).toBe('… · sonnet-5')
+  await $.prompt.submit(prompt('nice'))
+  expect(await s.spinner($)).toBe('… · haiku-5-5')
+})
+
+test('the session model is found by rung even when it reads as an alias', async ($, on) => {
+  const s = stubSession(on, { model: 'opus', tokens: 5000, score: 1 })
+  await $.prompt.submit(prompt('thanks'))
+  expect(await s.spinner($)).toBe('… · sonnet-5')
 })
 
 test('an upgrade switches right away and never compacts', async ($, on) => {
