@@ -12,7 +12,7 @@ const LADDER = {
 }
 
 // A session on `model` with `tokens` of context and `messages` in its transcript, where the
-// rater answers `score` (a number, or a function of the prompt the rater was sent).
+// rater answers `score` (a band, or a function of the prompt the rater was sent).
 function stubSession(on, { model, tokens, score, messages = [], store = new Map(), compactSkip = null }) {
   const calls = { compact: 0, sent: [], filled: [], rated: [] }
   store.set('ladder', LADDER)
@@ -67,7 +67,7 @@ function stubSession(on, { model, tokens, score, messages = [], store = new Map(
 const prompt = (text) => ({ text, wait: false, origin: { kind: 'composer' } })
 test('a downgrade with a big context compacts first, then re-sends the prompt to the cheaper model', async ($, on) => {
   const clock = mock.clock(on)
-  const s = stubSession(on, { model: 'claude-opus-5-5', tokens: 200000, score: 1 })
+  const s = stubSession(on, { model: 'claude-opus-5-5', tokens: 200000, score: 'trivial' })
   const first = await $.prompt.submit(prompt('thanks'))
   // Dropped: the host refuses compaction while the prompt is held.
   expect(first.drop).toMatch(/compacting before switching to sonnet-5/)
@@ -85,7 +85,7 @@ test('a downgrade with a big context compacts first, then re-sends the prompt to
 
 test('if compaction fails, the prompt is re-sent to the current model', async ($, on) => {
   const clock = mock.clock(on)
-  const s = stubSession(on, { model: 'claude-opus-5-5', tokens: 200000, score: 1, compactSkip: 'vetoed' })
+  const s = stubSession(on, { model: 'claude-opus-5-5', tokens: 200000, score: 'trivial', compactSkip: 'vetoed' })
   await $.prompt.submit(prompt('thanks'))
   await clock.advance(0)
   expect(s.calls.sent).toEqual(['thanks'])
@@ -94,7 +94,7 @@ test('if compaction fails, the prompt is re-sent to the current model', async ($
 
 test('a draft typed while compaction runs is left in the prompt box', async ($, on) => {
   const clock = mock.clock(on)
-  const s = stubSession(on, { model: 'claude-opus-5-5', tokens: 200000, score: 1 })
+  const s = stubSession(on, { model: 'claude-opus-5-5', tokens: 200000, score: 'trivial' })
   await $.prompt.submit(prompt('thanks'))
   s.setBox('wait, also check the ladder') // typed after the drop, before compaction ends
   await clock.advance(0)
@@ -103,7 +103,7 @@ test('a draft typed while compaction runs is left in the prompt box', async ($, 
 })
 
 test('a downgrade with a small context switches right away', async ($, on) => {
-  const s = stubSession(on, { model: 'claude-opus-5-5', tokens: 5000, score: 1 })
+  const s = stubSession(on, { model: 'claude-opus-5-5', tokens: 5000, score: 'trivial' })
   await $.prompt.submit(prompt('thanks'))
   expect(await s.spinner($)).toBe('… · sonnet-5')
   expect(s.calls.compact).toBe(0)
@@ -115,8 +115,8 @@ test('a short prompt is rated on the work in flight, not on its own length', asy
   const s = stubSession(on, {
     model: 'claude-opus-5-5',
     tokens: 5000,
-    // A rater that answers 9 only when it was shown the work in flight, 1 on the prompt alone.
-    score: (asked) => (asked.includes('planner cases') ? 9 : 1),
+    // A rater that answers involved only when it was shown the work in flight, trivial on the prompt alone.
+    score: (asked) => (asked.includes('planner cases') ? 'involved' : 'trivial'),
     messages: [
       { role: 'user', text: 'compare the new planner against the baseline', toolUses: [] },
       {
@@ -135,7 +135,7 @@ test('a short prompt is rated on the work in flight, not on its own length', asy
 })
 
 test('a run of trivial prompts walks down a rung at a time', async ($, on) => {
-  const s = stubSession(on, { model: 'claude-opus-5-5', tokens: 5000, score: 1 })
+  const s = stubSession(on, { model: 'claude-opus-5-5', tokens: 5000, score: 'trivial' })
   await $.prompt.submit(prompt('thanks'))
   expect(await s.spinner($)).toBe('… · sonnet-5')
   await $.prompt.submit(prompt('nice'))
@@ -143,13 +143,33 @@ test('a run of trivial prompts walks down a rung at a time', async ($, on) => {
 })
 
 test('the session model is found by rung even when it reads as an alias', async ($, on) => {
-  const s = stubSession(on, { model: 'opus', tokens: 5000, score: 1 })
+  const s = stubSession(on, { model: 'opus', tokens: 5000, score: 'trivial' })
   await $.prompt.submit(prompt('thanks'))
   expect(await s.spinner($)).toBe('… · sonnet-5')
 })
 
+test('a band names a family, and its strongest rung', async ($, on) => {
+  const s = stubSession(on, { model: 'claude-haiku-5-5', tokens: 5000, score: 'routine' })
+  await $.prompt.submit(prompt('add a --json flag to the list command'))
+  expect(await s.spinner($)).toBe('… · sonnet-5')
+})
+
+test('a band whose family is missing goes to the next stronger one', async ($, on) => {
+  // No fable on this ladder: hard work lands on opus, not below it.
+  const s = stubSession(on, { model: 'claude-sonnet-5', tokens: 5000, score: 'hard' })
+  await $.prompt.submit(prompt('redesign the storage layer'))
+  expect(await s.spinner($)).toBe('… · opus-5-5')
+})
+
+test('an answer that is not a band keeps the model and is logged as unrated', async ($, on) => {
+  const s = stubSession(on, { model: 'claude-opus-5-5', tokens: 5000, score: '5' })
+  await $.prompt.submit(prompt('go'))
+  expect(await s.spinner($)).toBe('…')
+  expect(s.store.get('decisions')).toMatchObject([{ why: 'unrated', to: 'claude-opus-5-5' }])
+})
+
 test('an upgrade switches right away and never compacts', async ($, on) => {
-  const s = stubSession(on, { model: 'claude-haiku-5-5', tokens: 200000, score: 10 })
+  const s = stubSession(on, { model: 'claude-haiku-5-5', tokens: 200000, score: 'hard' })
   await $.prompt.submit(prompt('redesign the storage layer'))
   expect(await s.spinner($)).toBe('… · opus-5-5')
   expect(s.calls.compact).toBe(0)
@@ -157,14 +177,14 @@ test('an upgrade switches right away and never compacts', async ($, on) => {
 
 test('reset forgets learned credit failures and rebuilds the ladder', async ($, on) => {
   const store = new Map([['needsCredits', ['claude-sonnet-5']]])
-  stubSession(on, { model: 'claude-opus-5-5', tokens: 0, score: 5, store })
+  stubSession(on, { model: 'claude-opus-5-5', tokens: 0, score: 'routine', store })
   on('command.register', () => ({ value: undefined }))
   await $.command.run({ command: 'autoswitch', args: 'reset', origin: { kind: 'composer' } })
   expect(store.get('needsCredits')).toEqual([])
 })
 
 test('each decision is logged and /autoswitch lists it', async ($, on) => {
-  const s = stubSession(on, { model: 'claude-opus-5-5', tokens: 5000, score: 1 })
+  const s = stubSession(on, { model: 'claude-opus-5-5', tokens: 5000, score: 'trivial' })
   on('command.register', () => ({ value: undefined }))
   await $.prompt.submit(prompt('thanks'))
   expect(s.store.get('decisions')).toMatchObject([

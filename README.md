@@ -34,11 +34,12 @@ spinner (`Thinking… · sonnet-5`) and under the prompt. `/model` keeps showing
 ## How it works
 
 1. **Discover**: lists your usable models (two newest per family, released in the last 180 days) and ranks them haiku < sonnet < opus < fable, then by version.
-2. **Rate**: a cheap model scores the next turn 1-10, reading the tail of the conversation as well as
-   your prompt, so `go` or `continue` is rated on the work it carries on from and not on its length.
-   The score picks a rung on the ladder, measured from the model in use (your `/model` choice on the
-   first prompt).
-3. **Switch**: going up switches right away, straight to the rung the score names. Going down moves
+2. **Rate**: a cheap model sorts the next turn into one of four bands, `trivial`, `routine`, `involved`
+   or `hard`, each pinned by examples. It reads the tail of the conversation as well as your prompt, so
+   `go` or `continue` is rated on the work it carries on from and not on its length. Each band names a
+   family, haiku to fable; a family you can't use passes the turn up to the next stronger one. An
+   answer that isn't a band keeps the model you're on.
+3. **Switch**: going up switches right away, straight to the rung the band names. Going down moves
    one rung at a time, so a turn misread as easy costs a rung instead of the whole ladder; a stretch
    of easy prompts still walks to the bottom. Going down with a large context holds your prompt,
    compacts, then re-sends it to the cheaper model. A model that fails is dropped and the turn retries one rung down. Models that need paid credits are skipped while your credits are off.

@@ -141,15 +141,27 @@ async function describeLadder($) {
     `\nLast compaction: ${lastCompaction}\n\n` + describeDecisions(log)
 }
 
-const RUBRIC = `Rate how hard the next turn of this conversation is for a coding assistant, from 1 to 10.
-Rate the work the request asks for, not how long the request is. A short request to carry on
-("go", "continue", "yes", "now do it") is exactly as hard as the work it continues, which the
+// What the rater answers, weakest first: each band asks for the family at the same place in
+// FAMILIES. A word from a fixed set is an easier call for a small model than a calibrated number.
+const BANDS = ['trivial', 'routine', 'involved', 'hard']
+
+// Each band is pinned by examples, so its edges don't move from one prompt to the next.
+const RUBRIC = `Which kind of turn comes next in this conversation for a coding assistant?
+Judge the work the turn asks for, not how long the request is. A short request to carry on
+("go", "continue", "yes", "now do it") is the same kind as the work it continues, which the
 conversation shows; an unfinished hard task is still hard.
-1-2: chit-chat, acknowledgements, trivial questions or one-line edits, or closing out finished work.
-3-5: routine, well-scoped work.
-6-8: multi-step work that needs care and judgment.
-9-10: ambiguous, open-ended, or deep problems: architecture, tricky debugging, large changes.
-Reply with the number only.`
+
+trivial: no real work, or a mechanical one-liner. Thanks, a yes/no question, commit and push,
+fix a typo, rename something in one place, wrap up work that is already done.
+routine: clear, well-scoped work with an obvious approach. Add a flag to an existing command,
+write a test for one function, update docs to match the code, explain what a file does, fix a bug
+whose cause is already known.
+involved: several steps or files, needing care and judgment. A feature that touches several files,
+a refactor, debugging a failure whose cause is not yet known, reviewing a change.
+hard: open-ended, ambiguous or deep. Design or redesign a system, a bug that resisted earlier
+attempts, a large migration, a question with no clear right answer.
+
+Answer with one word: ${BANDS.join(', ')}.`
 
 // How much conversation the rater reads. Enough to tell "go" with hard work in flight from "go"
 // once it is done, short enough that rating stays a cheap call.
@@ -204,9 +216,9 @@ async function rate($, text) {
     `\n\nThe request to rate:\n${text.slice(0, 4000)}`
   const reply = await $.model.complete({ model: rater(), prompt, maxTokens: 5 })
   // Newer builds answer { text, usage }, older ones a plain string.
-  const answer = typeof reply === 'string' ? reply : reply?.text ?? ''
-  const score = Number(answer.match(/\d+/)?.[0])
-  return score >= 1 && score <= 10 ? score : null
+  const answer = (typeof reply === 'string' ? reply : reply?.text ?? '').toLowerCase()
+  // Anything else is no rating at all, not a middle one.
+  return BANDS.find(b => new RegExp(`\\b${b}\\b`).test(answer)) ?? null
 }
 
 // "!opus" -> strongest opus; "!sonnet-5" -> claude-sonnet-5 exactly.
@@ -228,11 +240,21 @@ function rungOf(id) {
   return matched.length ? matched[matched.length - 1] : -1
 }
 
-// Walk to the rung the score names: straight up, since a hard prompt shouldn't wait on a weaker
+// The strongest rung of the band's family. A family missing from the ladder (no credits, too old)
+// gives way to the next stronger one, never a weaker one; past the top, the top rung.
+function rungFor(band) {
+  for (const family of FAMILIES.slice(BANDS.indexOf(band))) {
+    const rung = ladder.findLastIndex(m => m.family === family)
+    if (rung !== -1) return rung
+  }
+  return ladder.length - 1
+}
+
+// Walk to the rung the band names: straight up, since a hard prompt shouldn't wait on a weaker
 // model, but one rung at a time down, so a turn misread as easy costs a rung and not the whole
 // ladder. A stretch of easy prompts still walks to the bottom.
-function pick(score, from) {
-  const target = Math.round(((score - 1) / 9) * (ladder.length - 1))
+function pick(band, from) {
+  const target = rungFor(band)
   const at = rungOf(from)
   if (at === -1) return ladder[target].id
   return ladder[target > at ? target : Math.max(target, at - 1)].id
@@ -331,20 +353,20 @@ export function register(on, options) {
     const text = forcedId ? e.text.replace(OVERRIDE, '') : e.text
 
     // The rung to measure from. On the first prompt nothing is routed yet, and the model the
-    // person chose themselves is the anchor; without it a low score falls to the bottom rung.
+    // person chose themselves is the anchor; without it a low rating falls to the bottom rung.
     const previous = current ?? await $.session.model()
 
     let chosen = forcedId
     let why = 'forced'
     if (!chosen) {
-      const score = await rate($, text).catch(() => null)
+      const band = await rate($, text).catch(() => null)
       // Rating failed: leave the model as it is.
-      if (score === null) {
+      if (band === null) {
         await logDecision($, { prompt: text.slice(0, 60), why: 'unrated', from: previous, to: previous })
         return next(e)
       }
-      chosen = pick(score, previous)
-      why = 'score ' + score
+      chosen = pick(band, previous)
+      why = band
     }
 
     await logDecision($, { prompt: text.slice(0, 60), why, from: previous, to: chosen })
