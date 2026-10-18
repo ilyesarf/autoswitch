@@ -45,3 +45,22 @@ spinner (`Thinking… · sonnet-5`) and under the prompt. `/model` keeps showing
    one rung at a time, so a turn misread as easy costs a rung instead of the whole ladder; a stretch
    of easy prompts still walks to the bottom. Going down with a large context holds your prompt,
    compacts, then re-sends it to the cheaper model. A model that fails is dropped and the turn retries on its family's previous version, or one rung down. Models that need paid credits are skipped while your credits are off.
+
+## Changelog
+
+Installs are pinned to a version, so run `claude plugin update autoswitch@autoswitch` and restart to pick up a new one.
+
+- **0.7.0**: routes between one model per family, the newest usable one. Older versions are fallbacks for
+  when the newest fails, or for `!<model>`, not rungs, so they stop pulling turns to sonnet-5 or opus-5.
+- **0.6.0**: the rater answers one of four bands (`trivial`, `routine`, `involved`, `hard`) pinned by
+  examples, each naming a family, instead of a 1-10 score that clustered in the middle.
+- **0.5.1**: `/autoswitch` lists the last 20 routing decisions and why.
+- **0.5.0**: the rater reads the tail of the conversation, so `go` or `continue` is rated on the work
+  it carries on from and not on its length.
+- **0.4.1**: a dropped prompt is cleared from the prompt box instead of lingering there.
+- **0.4.0**: going down with a large context compacts first, then re-sends your prompt to the cheaper model.
+- **0.3.0**: compacts after the turn on downgrades; models that worked are no longer tagged as needing credits.
+- **0.2.0**: installable from a marketplace; the routed model shows in the spinner and under the prompt;
+  compaction failures are visible; models that need paid credits are skipped while credits are off;
+  models older than `max_model_age_days` and all but the two newest versions per family are dropped.
+- **0.1.0**: first release: plugin manifest and hooks scaffold.
