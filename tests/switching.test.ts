@@ -162,3 +162,14 @@ test('reset forgets learned credit failures and rebuilds the ladder', async ($, 
   await $.command.run({ command: 'autoswitch', args: 'reset', origin: { kind: 'composer' } })
   expect(store.get('needsCredits')).toEqual([])
 })
+
+test('each decision is logged and /autoswitch lists it', async ($, on) => {
+  const s = stubSession(on, { model: 'claude-opus-5-5', tokens: 5000, score: 1 })
+  on('command.register', () => ({ value: undefined }))
+  await $.prompt.submit(prompt('thanks'))
+  expect(s.store.get('decisions')).toMatchObject([
+    { prompt: 'thanks', from: 'claude-opus-5-5', to: 'claude-sonnet-5' },
+  ])
+  const shown = await $.command.run({ command: 'autoswitch', args: '', origin: { kind: 'composer' } })
+  expect(shown.text).toContain('opus-5-5 → sonnet-5  "thanks"')
+})

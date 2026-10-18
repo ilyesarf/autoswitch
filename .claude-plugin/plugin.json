@@ -1,6 +1,6 @@
 {
   "name": "autoswitch",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Picks a model for each prompt by rating its difficulty, so you don't have to /model by hand",
   "author": {
     "name": "esc"

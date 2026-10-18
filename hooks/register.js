@@ -119,11 +119,26 @@ async function markWorked($, id) {
   if (!known.includes(id)) await $.store.set('worked', [...known, id])
 }
 
-function describeLadder() {
+// Newest last. Kept across sessions, so the record outlives the session it was made in.
+async function logDecision($, entry) {
+  try {
+    const log = (await $.store.get('decisions')) ?? []
+    await $.store.set('decisions', [...log, { at: Date.now(), ...entry }].slice(-LOG_SIZE))
+  } catch {}
+}
+
+function describeDecisions(log) {
+  if (!log.length) return 'No decisions yet.'
+  return 'Recent decisions (oldest first):\n' + log.map(d =>
+    `  ${d.why.padEnd(9)} ${shortName(d.from)} → ${shortName(d.to)}  ${JSON.stringify(d.prompt)}`).join('\n')
+}
+
+async function describeLadder($) {
   if (!ladder.length) return 'No models discovered yet.'
+  const log = (await $.store.get('decisions').catch(() => null)) ?? []
   return 'Ladder (weakest → strongest):\n' +
     ladder.map((m, i) => `  ${i + 1}. ${m.id}${m.id === current ? '  ← current' : ''}`).join('\n') +
-    `\nLast compaction: ${lastCompaction}`
+    `\nLast compaction: ${lastCompaction}\n\n` + describeDecisions(log)
 }
 
 const RUBRIC = `Rate how hard the next turn of this conversation is for a coding assistant, from 1 to 10.
@@ -140,6 +155,9 @@ Reply with the number only.`
 // once it is done, short enough that rating stays a cheap call.
 const CONTEXT_MESSAGES = 6
 const CONTEXT_CHARS = 600
+
+// How many routing decisions /autoswitch keeps, so a misrouted prompt can be traced to its rating.
+const LOG_SIZE = 20
 
 const OVERRIDE = /^\s*!([\w.-]+)\s*/
 
@@ -300,7 +318,7 @@ export function register(on, options) {
     if (arg === 'reset') await $.store.set('needsCredits', [])
     if (arg === 'refresh' || arg === 'reset') ladder = await discover($, true)
     else if (!ladder.length) ladder = await discover($, false)
-    return { text: describeLadder() }
+    return { text: await describeLadder($) }
   })
 
   on('prompt.submit', async ($, e, next) => {
@@ -321,11 +339,15 @@ export function register(on, options) {
     if (!chosen) {
       const score = await rate($, text).catch(() => null)
       // Rating failed: leave the model as it is.
-      if (score === null) return next(e)
+      if (score === null) {
+        await logDecision($, { prompt: text.slice(0, 60), why: 'unrated', from: previous, to: previous })
+        return next(e)
+      }
       chosen = pick(score, previous)
       why = 'score ' + score
     }
 
+    await logDecision($, { prompt: text.slice(0, 60), why, from: previous, to: chosen })
     if (chosen !== previous && rungOf(chosen) !== rungOf(previous)) {
       // Going down with a big context: compact first, so the cheaper model answers this very
       // prompt from a small context. Prompts with attachments can't be re-sent as they were.

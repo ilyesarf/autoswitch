@@ -27,7 +27,7 @@ Just prompt as usual. A toast shows when it switches, and the model actually ans
 spinner (`Thinking… · sonnet-5`) and under the prompt. `/model` keeps showing your configured default.
 
 - `!<model> prompt` forces a model: `!opus`, `!sonnet-5`, `!haiku-5-5`
-- `/autoswitch` shows the model ladder and the last compaction, `/autoswitch refresh` rebuilds it,
+- `/autoswitch` shows the model ladder, the last compaction and the last 20 routing decisions, `/autoswitch refresh` rebuilds it,
   `/autoswitch reset` also forgets models wrongly marked as needing credits
 - `/config` has `compact_threshold` (default 100k tokens) and `max_model_age_days` (default 180)
 
