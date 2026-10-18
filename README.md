@@ -33,7 +33,9 @@ spinner (`Thinking… · sonnet-5`) and under the prompt. `/model` keeps showing
 
 ## How it works
 
-1. **Discover**: lists your usable models (two newest per family, released in the last 180 days) and ranks them haiku < sonnet < opus < fable, then by version.
+1. **Discover**: lists your usable models released in the last 180 days and keeps the newest of each
+   family as a rung, haiku < sonnet < opus < fable. The family's previous version is kept as a fallback
+   for when the newest fails, not as a rung of its own.
 2. **Rate**: a cheap model sorts the next turn into one of four bands, `trivial`, `routine`, `involved`
    or `hard`, each pinned by examples. It reads the tail of the conversation as well as your prompt, so
    `go` or `continue` is rated on the work it carries on from and not on its length. Each band names a
@@ -42,4 +44,4 @@ spinner (`Thinking… · sonnet-5`) and under the prompt. `/model` keeps showing
 3. **Switch**: going up switches right away, straight to the rung the band names. Going down moves
    one rung at a time, so a turn misread as easy costs a rung instead of the whole ladder; a stretch
    of easy prompts still walks to the bottom. Going down with a large context holds your prompt,
-   compacts, then re-sends it to the cheaper model. A model that fails is dropped and the turn retries one rung down. Models that need paid credits are skipped while your credits are off.
+   compacts, then re-sends it to the cheaper model. A model that fails is dropped and the turn retries on its family's previous version, or one rung down. Models that need paid credits are skipped while your credits are off.

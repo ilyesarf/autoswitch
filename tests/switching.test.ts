@@ -13,9 +13,9 @@ const LADDER = {
 
 // A session on `model` with `tokens` of context and `messages` in its transcript, where the
 // rater answers `score` (a band, or a function of the prompt the rater was sent).
-function stubSession(on, { model, tokens, score, messages = [], store = new Map(), compactSkip = null }) {
+function stubSession(on, { model, tokens, score, messages = [], store = new Map(), compactSkip = null, ladder = LADDER }) {
   const calls = { compact: 0, sent: [], filled: [], rated: [] }
-  store.set('ladder', LADDER)
+  store.set('ladder', ladder)
   on('store.get', ($, e) => ({ value: store.get(e.key) }))
   on('store.set', ($, e) => {
     store.set(e.key, e.value)
@@ -62,6 +62,16 @@ function stubSession(on, { model, tokens, score, messages = [], store = new Map(
     await ui.unmount()
     return suffix
   } }
+}
+
+// Two opus versions, as discovery keeps them: the older one is a fallback, not a rung.
+const WITH_FALLBACK = {
+  ...LADDER,
+  models: [
+    LADDER.models[0], LADDER.models[1],
+    { id: 'claude-opus-5', family: 'opus', version: [5], window: 1000000, created: recent },
+    LADDER.models[2],
+  ],
 }
 
 const prompt = (text) => ({ text, wait: false, origin: { kind: 'composer' } })
@@ -192,4 +202,33 @@ test('each decision is logged and /autoswitch lists it', async ($, on) => {
   ])
   const shown = await $.command.run({ command: 'autoswitch', args: '', origin: { kind: 'composer' } })
   expect(shown.text).toContain('opus-5-5 → sonnet-5  "thanks"')
+})
+
+test('an older version is not a rung: stepping down from opus goes to sonnet', async ($, on) => {
+  const s = stubSession(on, { model: 'claude-opus-5-5', tokens: 5000, score: 'trivial', ladder: WITH_FALLBACK })
+  on('command.register', () => ({ value: undefined }))
+  await $.prompt.submit(prompt('thanks'))
+  expect(await s.spinner($)).toBe('… · sonnet-5')
+  const shown = await $.command.run({ command: 'autoswitch', args: '', origin: { kind: 'composer' } })
+  expect(shown.text).toContain('Fallbacks if the newest fails: claude-opus-5')
+  expect(shown.text).not.toContain('. claude-opus-5\n')
+})
+
+test('a newest model that fails falls back to its family\'s previous version', async ($, on) => {
+  const s = stubSession(on, { model: 'claude-sonnet-5', tokens: 5000, score: 'involved', ladder: WITH_FALLBACK })
+  const asked = []
+  on('turn.step', async function* ($, e) {
+    asked.push(e.model)
+    const done = { turnId: e.turnId, index: e.index, answer: '', toolUses: [], usage: null }
+    if (e.model === 'claude-opus-5-5') {
+      return { ...done, stopReason: null }
+    }
+    yield { kind: 'text', index: 0, text: 'ok' }
+    return { ...done, answer: 'ok', stopReason: 'end_turn' }
+  })
+  await $.prompt.submit(prompt('refactor the planner'))
+  const stream = $.turn.step({ turnId: 't', index: 0, model: 'claude-sonnet-5', messageCount: 1 })
+  for await (const chunk of stream) void chunk
+  expect(asked).toEqual(['claude-opus-5-5', 'claude-opus-5'])
+  expect(await s.spinner($)).toBe('… · opus-5')
 })

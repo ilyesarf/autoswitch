@@ -3,10 +3,12 @@
 // Weakest to strongest. Within a family, higher versions rank higher.
 const FAMILIES = ['haiku', 'sonnet', 'opus', 'fable']
 const LADDER_TTL_MS = 24 * 60 * 60 * 1000
-// Older versions only add weak rungs; the previous version is still a useful downgrade.
+// The previous version is kept as a fallback for the newest, not as a rung of its own: it is a
+// weaker model at much the same price, so stepping down to it costs quality and saves little.
 const VERSIONS_PER_FAMILY = 2
 
-let ladder = [] // [{ id, family, version, window, created }], weakest first
+let known = [] // usable models [{ id, family, version, window, created }], weakest first
+let ladder = [] // the strongest usable model of each family: what turns are routed between
 let maxAgeDays = 180
 
 // "claude-sonnet-4-5-20250929" -> [4, 5]; a trailing date is not part of the version.
@@ -29,6 +31,15 @@ function trim(models) {
   const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000
   const sorted = models.filter(m => Date.parse(m.created) >= cutoff).sort(compareModels)
   return sorted.filter(m => sorted.filter(o => o.family === m.family && compareModels(o, m) > 0).length < VERSIONS_PER_FAMILY)
+}
+
+function strongestPerFamily(models) {
+  return models.filter(m => !models.some(o => o.family === m.family && compareModels(o, m) > 0))
+}
+
+function use(models) {
+  known = models
+  ladder = strongestPerFamily(models)
 }
 
 async function listModels($) {
@@ -104,19 +115,19 @@ async function discover($, force) {
 // A model failed a real request. If credits are off and it has never answered without them,
 // missing credits is why, so remember it. Otherwise it's dropped for this session only.
 async function markFailed($, id) {
-  ladder = ladder.filter(m => m.id !== id)
+  use(known.filter(m => m.id !== id))
   if (await hasCredits($)) return
   if ((await worked($)).includes(id)) return
-  const known = await needsCredits($)
-  if (!known.includes(id)) await $.store.set('needsCredits', [...known, id])
+  const learned = await needsCredits($)
+  if (!learned.includes(id)) await $.store.set('needsCredits', [...learned, id])
   const cached = await $.store.get('ladder')
   if (cached) await $.store.set('ladder', { ...cached, models: cached.models.filter(m => m.id !== id) })
 }
 
 async function markWorked($, id) {
   if (creditsOn !== false) return
-  const known = await worked($)
-  if (!known.includes(id)) await $.store.set('worked', [...known, id])
+  const learned = await worked($)
+  if (!learned.includes(id)) await $.store.set('worked', [...learned, id])
 }
 
 // Newest last. Kept across sessions, so the record outlives the session it was made in.
@@ -136,8 +147,10 @@ function describeDecisions(log) {
 async function describeLadder($) {
   if (!ladder.length) return 'No models discovered yet.'
   const log = (await $.store.get('decisions').catch(() => null)) ?? []
+  const fallbacks = known.filter(m => !ladder.includes(m))
   return 'Ladder (weakest → strongest):\n' +
     ladder.map((m, i) => `  ${i + 1}. ${m.id}${m.id === current ? '  ← current' : ''}`).join('\n') +
+    (fallbacks.length ? `\nFallbacks if the newest fails: ${fallbacks.map(m => m.id).join(', ')}` : '') +
     `\nLast compaction: ${lastCompaction}\n\n` + describeDecisions(log)
 }
 
@@ -221,11 +234,11 @@ async function rate($, text) {
   return BANDS.find(b => new RegExp(`\\b${b}\\b`).test(answer)) ?? null
 }
 
-// "!opus" -> strongest opus; "!sonnet-5" -> claude-sonnet-5 exactly.
+// "!opus" -> strongest opus; "!sonnet-5" -> claude-sonnet-5 exactly, fallbacks included.
 function findOverride(name) {
-  const exact = ladder.find(m => m.id === name || m.id === 'claude-' + name)
+  const exact = known.find(m => m.id === name || m.id === 'claude-' + name)
   if (exact) return exact.id
-  const matches = ladder.filter(m => m.id.includes(name))
+  const matches = known.filter(m => m.id.includes(name))
   return matches.length ? matches[matches.length - 1].id : null
 }
 
@@ -234,6 +247,9 @@ function findOverride(name) {
 function rungOf(id) {
   const exact = ladder.findIndex(m => m.id === id)
   if (exact !== -1) return exact
+  // A fallback sits on its family's rung.
+  const fallback = known.find(m => m.id === id)
+  if (fallback) return ladder.findIndex(m => m.family === fallback.family)
   const name = String(id ?? '').replace(/^claude-/, '').replace(/\[.*$/, '')
   if (!name) return -1
   const matched = ladder.map((m, i) => (m.id.includes(name) ? i : -1)).filter(i => i !== -1)
@@ -331,21 +347,21 @@ export function register(on, options) {
       argumentHint: '[refresh|reset]',
     })
     // Don't hold up the session; switching starts once the ladder is known.
-    discover($, false).then(models => { ladder = models }, () => {})
+    discover($, false).then(use, () => {})
     return next(e)
   })
 
   on('command.run', { command: 'autoswitch' }, async ($, e) => {
     const arg = e.args.trim()
     if (arg === 'reset') await $.store.set('needsCredits', [])
-    if (arg === 'refresh' || arg === 'reset') ladder = await discover($, true)
-    else if (!ladder.length) ladder = await discover($, false)
+    if (arg === 'refresh' || arg === 'reset') use(await discover($, true))
+    else if (!ladder.length) use(await discover($, false))
     return { text: await describeLadder($) }
   })
 
   on('prompt.submit', async ($, e, next) => {
     if (!USER_ORIGINS.includes(e.origin?.kind)) return next(e)
-    if (!ladder.length) ladder = await discover($, false).catch(() => [])
+    if (!ladder.length) use(await discover($, false).catch(() => []))
     if (!ladder.length) return next(e)
 
     const forced = e.text.match(OVERRIDE)
@@ -408,24 +424,25 @@ export function register(on, options) {
         yield step.value
       }
       const result = step.value
-      // A request that failed before any response (e.g. no credits for that model):
-      // drop the model and retry one rung down.
+      // A request that failed before any response (e.g. no credits for that model): drop the
+      // model and retry on the next weaker one, its family's previous version if there is one.
       const failed = held !== null && result?.stopReason == null && !next.signal.aborted
       if (!failed) for (const chunk of held ?? []) yield chunk
-      const at = ladder.findIndex(m => m.id === current)
       if (!failed) {
         if (result?.stopReason != null) await markWorked($, current).catch(() => {})
         return result
       }
-      if (at <= 0) {
+      const dropped = known.find(m => m.id === current)
+      const below = dropped && strongestPerFamily(known.filter(m => m !== dropped))
+        .findLast(m => compareModels(m, dropped) < 0)
+      if (!below) {
         for (const chunk of held) yield chunk
         return result
       }
-      const dropped = current
-      await markFailed($, dropped)
-      current = ladder[at - 1].id
+      await markFailed($, dropped.id)
+      current = below.id
       $.ui.invalidate('ui.render')
-      $.ui.toast(`autoswitch: ${dropped} failed, using ${current}`)
+      $.ui.toast(`autoswitch: ${dropped.id} failed, using ${current}`)
     }
   })
 
