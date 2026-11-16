@@ -7,9 +7,12 @@ const LADDER_TTL_MS = 24 * 60 * 60 * 1000
 // weaker model at much the same price, so stepping down to it costs quality and saves little.
 const VERSIONS_PER_FAMILY = 2
 
-let known = [] // usable models [{ id, family, version, window, created }], weakest first
+let everything = [] // every usable model, ignored ones too: `!<model>` can still reach them
+let known = [] // the usable models not ignored [{ id, family, version, window, created }], weakest first
 let ladder = [] // the strongest usable model of each family: what turns are routed between
 let maxAgeDays = 180
+let configIgnored = [] // from the ignored_models option
+let storedIgnored = [] // from /autoswitch ignore
 
 // "claude-sonnet-4-5-20250929" -> [4, 5]; a trailing date is not part of the version.
 function parseVersion(id, family) {
@@ -37,9 +40,20 @@ function strongestPerFamily(models) {
   return models.filter(m => !models.some(o => o.family === m.family && compareModels(o, m) > 0))
 }
 
+// "claude-sonnet-5" is ignored by "sonnet" (its family), "sonnet-5" or the full id.
+function isIgnored(m) {
+  const names = [m.family, shortName(m.id), m.id]
+  return [...configIgnored, ...storedIgnored].some(name => names.includes(name))
+}
+
+function normalizeName(name) {
+  return name.trim().toLowerCase().replace(/^claude-/, '')
+}
+
 function use(models) {
-  known = models
-  ladder = strongestPerFamily(models)
+  everything = models
+  known = models.filter(m => !isIgnored(m))
+  ladder = strongestPerFamily(known)
 }
 
 async function listModels($) {
@@ -96,6 +110,7 @@ async function worked($) {
 let creditsOn = null // as last seen by discover
 
 async function discover($, force) {
+  storedIgnored = (await $.store.get('ignored').catch(() => null)) ?? []
   const credits = await hasCredits($)
   creditsOn = credits
   const cached = await $.store.get('ladder')
@@ -115,7 +130,7 @@ async function discover($, force) {
 // A model failed a real request. If credits are off and it has never answered without them,
 // missing credits is why, so remember it. Otherwise it's dropped for this session only.
 async function markFailed($, id) {
-  use(known.filter(m => m.id !== id))
+  use(everything.filter(m => m.id !== id))
   if (await hasCredits($)) return
   if ((await worked($)).includes(id)) return
   const learned = await needsCredits($)
@@ -144,14 +159,19 @@ function describeDecisions(log) {
     `  ${d.why.padEnd(9)} ${shortName(d.from)} → ${shortName(d.to)}  ${JSON.stringify(d.prompt)}`).join('\n')
 }
 
+function describeIgnored() {
+  const names = [...configIgnored.map(n => n + ' (/config)'), ...storedIgnored]
+  return names.length ? `Ignored: ${names.join(', ')}` : 'Ignored: none (/autoswitch ignore <model>)'
+}
+
 async function describeLadder($) {
-  if (!ladder.length) return 'No models discovered yet.'
+  if (!ladder.length) return everything.length ? 'Every model is ignored. ' + describeIgnored() : 'No models discovered yet.'
   const log = (await $.store.get('decisions').catch(() => null)) ?? []
   const fallbacks = known.filter(m => !ladder.includes(m))
   return 'Ladder (weakest → strongest):\n' +
     ladder.map((m, i) => `  ${i + 1}. ${m.id}${m.id === current ? '  ← current' : ''}`).join('\n') +
     (fallbacks.length ? `\nFallbacks if the newest fails: ${fallbacks.map(m => m.id).join(', ')}` : '') +
-    `\nLast compaction: ${lastCompaction}\n\n` + describeDecisions(log)
+    `\n${describeIgnored()}\nLast compaction: ${lastCompaction}\n\n` + describeDecisions(log)
 }
 
 // What the rater answers, weakest first: each band asks for the family at the same place in
@@ -235,10 +255,11 @@ async function rate($, text) {
 }
 
 // "!opus" -> strongest opus; "!sonnet-5" -> claude-sonnet-5 exactly, fallbacks included.
+// Ignored models are found too: naming one is a choice that overrides the ignore list.
 function findOverride(name) {
-  const exact = known.find(m => m.id === name || m.id === 'claude-' + name)
+  const exact = everything.find(m => m.id === name || m.id === 'claude-' + name)
   if (exact) return exact.id
-  const matches = known.filter(m => m.id.includes(name))
+  const matches = everything.filter(m => m.id.includes(name))
   return matches.length ? matches[matches.length - 1].id : null
 }
 
@@ -336,15 +357,33 @@ function isUpgrade(from, to) {
   return a === -1 || rungOf(to) > a
 }
 
+// Add or remove a name on the stored ignore list, and say what that did to the ladder.
+async function changeIgnored($, action, name) {
+  if (action === 'unignore') {
+    if (configIgnored.includes(name)) return `"${name}" is ignored by the ignored_models option; remove it in /config.`
+    if (!storedIgnored.includes(name)) return `"${name}" isn't ignored. ${describeIgnored()}`
+    storedIgnored = storedIgnored.filter(n => n !== name)
+  } else {
+    const fits = everything.some(m => [m.family, shortName(m.id), m.id].includes(name))
+    if (!fits) return `No model is called "${name}". Use a family or a name like ${everything.length ? shortName(everything[everything.length - 1].id) : 'sonnet-5'}.`
+    if (storedIgnored.includes(name) || configIgnored.includes(name)) return `"${name}" is already ignored.`
+    storedIgnored = [...storedIgnored, name]
+  }
+  await $.store.set('ignored', storedIgnored)
+  use(everything)
+  return (action === 'ignore' ? `Ignoring ${name}.` : `No longer ignoring ${name}.`) + '\n\n' + await describeLadder($)
+}
+
 export function register(on, options) {
   const threshold = options?.compact_threshold ?? 100000
   maxAgeDays = options?.max_model_age_days ?? maxAgeDays
+  configIgnored = String(options?.ignored_models ?? '').split(',').map(normalizeName).filter(Boolean)
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'autoswitch',
-      description: 'Show the model ladder; "refresh" re-discovers models, "reset" also forgets learned credit failures',
-      argumentHint: '[refresh|reset]',
+      description: 'Show the model ladder; "refresh" re-discovers models, "reset" also forgets learned credit failures, "ignore"/"unignore" keep a model off the ladder',
+      argumentHint: '[refresh|reset|ignore <model>|unignore <model>]',
     })
     // Don't hold up the session; switching starts once the ladder is known.
     discover($, false).then(use, () => {})
@@ -353,6 +392,11 @@ export function register(on, options) {
 
   on('command.run', { command: 'autoswitch' }, async ($, e) => {
     const arg = e.args.trim()
+    const change = arg.match(/^(ignore|unignore)\s+(\S.*)$/i)
+    if (change) {
+      if (!everything.length) use(await discover($, false))
+      return { text: await changeIgnored($, change[1].toLowerCase(), normalizeName(change[2])) }
+    }
     if (arg === 'reset') await $.store.set('needsCredits', [])
     if (arg === 'refresh' || arg === 'reset') use(await discover($, true))
     else if (!ladder.length) use(await discover($, false))
@@ -432,7 +476,7 @@ export function register(on, options) {
         if (result?.stopReason != null) await markWorked($, current).catch(() => {})
         return result
       }
-      const dropped = known.find(m => m.id === current)
+      const dropped = everything.find(m => m.id === current)
       const below = dropped && strongestPerFamily(known.filter(m => m !== dropped))
         .findLast(m => compareModels(m, dropped) < 0)
       if (!below) {

@@ -1,6 +1,6 @@
 {
   "name": "autoswitch",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Picks a model for each prompt by rating its difficulty, so you don't have to /model by hand",
   "author": {
     "name": "esc"
@@ -19,6 +19,12 @@
       "description": "Models released longer ago than this are left off the ladder",
       "default": 180,
       "min": 1
+    },
+    "ignored_models": {
+      "type": "string",
+      "title": "Ignored models",
+      "description": "Comma-separated families, names or ids that are never routed to, e.g. haiku, sonnet-4-5. Forcing one with !<model> still works. /autoswitch ignore <model> adds to this",
+      "default": ""
     }
   }
 }

@@ -232,3 +232,42 @@ test('a newest model that fails falls back to its family\'s previous version', a
   expect(asked).toEqual(['claude-opus-5-5', 'claude-opus-5'])
   expect(await s.spinner($)).toBe('… · opus-5')
 })
+
+test('an ignored family is never routed to; its band goes to the next stronger one', async ($, on) => {
+  const store = new Map([['ignored', ['sonnet']]])
+  const s = stubSession(on, { model: 'claude-haiku-5-5', tokens: 5000, score: 'routine', store })
+  await $.prompt.submit(prompt('add a --json flag to the list command'))
+  expect(await s.spinner($)).toBe('… · opus-5-5')
+})
+
+test('ignoring the newest version promotes the previous one to its rung', async ($, on) => {
+  const store = new Map([['ignored', ['opus-5-5']]])
+  const s = stubSession(on, { model: 'claude-haiku-5-5', tokens: 5000, score: 'hard', store, ladder: WITH_FALLBACK })
+  await $.prompt.submit(prompt('redesign the storage layer'))
+  expect(await s.spinner($)).toBe('… · opus-5')
+})
+
+test('!<model> can still force an ignored model', async ($, on) => {
+  const store = new Map([['ignored', ['haiku']]])
+  const s = stubSession(on, { model: 'claude-opus-5-5', tokens: 5000, score: 'trivial', store })
+  await $.prompt.submit(prompt('!haiku hi'))
+  expect(await s.spinner($)).toBe('… · haiku-5-5')
+  expect(s.calls.sent).toEqual(['hi'])
+})
+
+test('/autoswitch ignore and unignore change the ladder and are remembered', async ($, on) => {
+  const s = stubSession(on, { model: 'claude-opus-5-5', tokens: 5000, score: 'trivial' })
+  on('command.register', () => ({ value: undefined }))
+  const run = (args) => $.command.run({ command: 'autoswitch', args, origin: { kind: 'composer' } })
+  const ignored = await run('ignore sonnet')
+  expect(ignored.text).toContain('Ignoring sonnet.')
+  expect(ignored.text).toContain('Ignored: sonnet')
+  expect(ignored.text).not.toContain('claude-sonnet-5\n')
+  expect(s.store.get('ignored')).toEqual(['sonnet'])
+  await $.prompt.submit(prompt('thanks'))
+  expect(await s.spinner($)).toBe('… · haiku-5-5')
+  expect((await run('ignore nonsense')).text).toContain('No model is called "nonsense"')
+  const back = await run('unignore sonnet')
+  expect(back.text).toContain('No longer ignoring sonnet.')
+  expect(s.store.get('ignored')).toEqual([])
+})
