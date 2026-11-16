@@ -27,9 +27,12 @@ Just prompt as usual. A toast shows when it switches, and the model actually ans
 spinner (`Thinking… · sonnet-5`) and under the prompt. `/model` keeps showing your configured default.
 
 - `!<model> prompt` forces a model: `!opus`, `!sonnet-5`, `!haiku-5-5`
+- `/autoswitch ignore <model>` keeps a family, name or id (`haiku`, `sonnet-4-5`) off the ladder, `/autoswitch unignore <model>`
+  undoes it. `!<model>` still reaches an ignored model
 - `/autoswitch` shows the model ladder, the last compaction and the last 20 routing decisions, `/autoswitch refresh` rebuilds it,
   `/autoswitch reset` also forgets models wrongly marked as needing credits
-- `/config` has `compact_threshold` (default 100k tokens) and `max_model_age_days` (default 180)
+- `/config` has `compact_threshold` (default 100k tokens), `max_model_age_days` (default 180) and `ignored_models`
+  (comma-separated, same names as `/autoswitch ignore`)
 
 ## How it works
 
@@ -50,6 +53,8 @@ spinner (`Thinking… · sonnet-5`) and under the prompt. `/model` keeps showing
 
 Installs are pinned to a version, so run `claude plugin update autoswitch@autoswitch` and restart to pick up a new one.
 
+- **0.8.0**: models can be ignored, with `/autoswitch ignore <model>` or the `ignored_models` option. An ignored
+  model is never routed to, but `!<model>` still forces it.
 - **0.7.0**: routes between one model per family, the newest usable one. Older versions are fallbacks for
   when the newest fails, or for `!<model>`, not rungs, so they stop pulling turns to sonnet-5 or opus-5.
 - **0.6.0**: the rater answers one of four bands (`trivial`, `routine`, `involved`, `hard`) pinned by
